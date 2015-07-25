@@ -1,7 +1,6 @@
 'use strict';
 
 const http = require('http');
-const net = require('net');
 
 const websocket = require('./websocket');
 
@@ -225,5 +224,16 @@ http.createServer((req, res) => {
 }).listen(WEBSERVER_PORT, WEBSERVER_IP);
 
 console.log(`Server running at http://${WEBSERVER_IP}:${WEBSERVER_PORT}`);
+
+websocket.createServer(conn => {
+  console.log('client connected to websocket from ' + conn.remoteAddress);
+
+  conn.on('message', message => {
+    console.log(message.toString('utf8'));
+  });
+}).listen(WEBSOCKET_PORT, WEBSERVER_IP, () =>
+  console.log(`Websocket server running at ws://${WEBSERVER_IP}:${WEBSOCKET_PORT}`)
+);
+
 
 
