@@ -126,6 +126,7 @@ const input  = elementFactory('input');
 const li     = elementFactory('li');
 const link   = elementFactory('link');
 const p      = elementFactory('p');
+const pre    = elementFactory('pre');
 const script = elementFactory('script');
 const span   = elementFactory('span');
 const table  = elementFactory('table');
@@ -151,7 +152,8 @@ const index = html (
         'type': 'text',
         'placeholder': 'Type your message and press [Enter]',
         'class': 'form-control'
-      })
+      }),
+      ul ({'id': 'messageList'})
     ),
     script ({src: 'index.js'})
   )
@@ -159,42 +161,33 @@ const index = html (
 
 const js = `
   'use strict';
-  
-  function ServerConnection(url, port) {
-    this.url = url;
-    this.port = port;
-    this._receive_bound = this._receive.bind(this);
-  }
-  Object.defineProperties(ServerConnection.prototype, {
-    init: { value: function() {
-      this.ws = new WebSocket('ws://' + this.url + ':' + this.port);
-      console.log('Connecting to ws://' + this.url + ':' + this.port);
-    }},
-    send: { value: function(message) {
-      this.ws.send(message);
-    }},
-    _receive: { value: function() {
-      
-    }},
-    _listeners: { value: [] },
-    addListener: { value: function() {
-      
-    }},
-    removeListener: { value: function(listener) {
-      
-    }}
-  });
-  
-  var serverConnection = new ServerConnection('127.0.0.1', ${WEBSOCKET_PORT});
-  serverConnection.init();
-  serverConnection.ws.onopen = function() { serverConnection.send("hello") };
-  
+
   var newMessageField = document.getElementById('newMessage');
-  newMessageField.addEventListener('keyDown', function(evt) {
-    if (evt.keyCode === 13) /* enter key */ {
-      serverConnection.send(newMessageField.value);
-      newMessageField.value = '';
-    }
+  var messageList = document.getElementById('messageList');
+  
+  document.addEventListener('DOMContentLoaded', function() {
+    newMessageField = document.getElementById('newMessage');
+    messageList = document.getElementById('messageList');
+
+    var ws = new WebSocket('ws://127.0.0.1:' + ${WEBSOCKET_PORT});
+    ws.onopen = function() {
+      ws.send("hello");
+    };
+    ws.onmessage = function(evt) {
+      console.log(evt.data);
+
+      var data = JSON.parse(evt.data);
+      var li = document.createElement('li');
+      li.textContent = '[' + data.from + '] ' + data.message;
+      messageList.appendChild(li);
+    };
+  
+    newMessageField.addEventListener('keydown', function(evt) {
+      if (evt.keyCode === 13) /* enter key */ {
+        ws.send(newMessageField.value);
+        newMessageField.value = '';
+      }
+    });
   });
 `;
 
@@ -225,12 +218,27 @@ http.createServer((req, res) => {
 
 console.log(`Server running at http://${WEBSERVER_IP}:${WEBSERVER_PORT}`);
 
+const conns = new Set();
+
 websocket.createServer(conn => {
   console.log('client connected to websocket from ' + conn.remoteAddress);
+  conns.add(conn);
 
   conn.on('message', message => {
     console.log(message.toString('utf8'));
+
+    conns.forEach((recipient, id) =>
+      recipient.sendMessage(JSON.stringify({
+        message: message,
+        from: conn.remoteAddress + ' (#' + id + ')'
+      }))
+    );
   });
+
+  conn.on('close', () => {
+    conns.delete(conn);
+  });
+
 }).listen(WEBSOCKET_PORT, WEBSERVER_IP, () =>
   console.log(`Websocket server running at ws://${WEBSERVER_IP}:${WEBSOCKET_PORT}`)
 );

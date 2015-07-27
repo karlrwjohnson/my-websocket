@@ -3,20 +3,35 @@
 const crypto = require('crypto');
 const net = require('net');
 
+function getCallerInfo() {
+  const stackStrings = (new Error()).stack.split('\n');
+  const callerInfo = stackStrings[3];
+  const parsed = callerInfo.match(/^\s+at (?:.*\()?(.+):(\d+):(\d+)\)?$/);
+  return {
+    filename: parsed[1],
+    line: parsed[2],
+    column: parsed[3],
+  }
+}
+
 function logTraffic() {
-  console.log.apply(console, arguments);
+  const callerInfo = getCallerInfo();
+  const callerString = callerInfo.filename + ':' + callerInfo.line;
+  const argsArray = [].slice.apply(arguments);
+  console.log.apply(console, [callerString].concat(argsArray));
 }
 
 
 function declareEnum(fn, members) {
   for (let i = 0; i < members.length; i++) {
-    let member = members[i];
-    let instance = new fn();
+    const member = members[i];
+    const instance = new fn();
     Object.defineProperty(fn, member, { value: instance, enumerable: true });
+    Object.defineProperty(fn, i, { value: instance, enumerable: true });
     Object.defineProperty(fn.prototype, member, { value: instance, enumerable: true });
     Object.defineProperties(instance, {
-      'name': { value: member },
-      'ordinal': { value: i },
+      'name': { value: member, enumerable: true },
+      'ordinal': { value: i, enumerable: true },
     });
   }
   Object.defineProperty(fn.prototype, 'toString', { value: function() {
@@ -43,6 +58,8 @@ declareEnum(OpCode, [
   'RESERVED_14',
   'RESERVED_15'
 ]);
+
+module.exports.OpCode = OpCode;
 
 class BufferedReader {
   constructor() {
@@ -187,13 +204,13 @@ class WSBufferedReader {
       frame.rsv1          = !!(byte & 0b01000000);
       frame.rsv2          = !!(byte & 0b00100000);
       frame.rsv3          = !!(byte & 0b00010000);
-      frame.opcode        =    byte & 0b00001111;
+      frame.opcode        = OpCode[byte & 0b00001111];
 
       byte = itr.next();
       frame.masked        = !!(byte & 0b10000000);
       frame.payloadLen    =    byte & 0b01111111;
 
-            if (frame.payloadLen === 126) {
+      if (frame.payloadLen === 126) {
         frame.payloadLen = itr.next() << 8 | itr.next();
       }
       else if (frame.payloadLen === 127) {
@@ -219,6 +236,7 @@ class WSBufferedReader {
 
       itr.popToCursor();
 
+      logTraffic(frame);
       return frame;
     } catch (e) {
       if (e === itr.END_OF_DATA) {
@@ -233,8 +251,13 @@ class WSBufferedReader {
     for (let i = 0; i < this._frames.length; i++) {
       if (this._frames[i].fin) {
         let message = this._frames.slice(0, i + 1)
-          .map(frame => frame.payload)
+          .map(
+            (this._frames[0].opcode === OpCode.TEXT) ?
+              frame => frame.payload.toString('utf8') :
+              frame => frame.payload
+          )
           .reduce((f1, f2) => f1.concat(f2));
+
         this._frames.splice(0, i + 1);
         return message; 
       }
@@ -265,7 +288,54 @@ function sendAck(conn, incomingHeaders) {
   conn.write('\n');
 }
 
+function writeWSFrame(conn, payload, opts) {
+  let opCode;
 
+  if (typeof payload === 'string') {
+    payload = new Buffer(payload);
+    opCode = opts && 'opCode' in opts ? opts.opcode : OpCode.TEXT;
+  } else if (payload instanceof Buffer) {
+    // no need to convert
+    opCode = opts && 'opCode' in opts ? opts.opcode : OpCode.BINARY;
+  } else {
+    throw Error('Not sure how to handle payload of type ' + payload);
+  }
+
+  if (typeof opCode !== 'number') {
+    opCode = opCode.ordinal;
+  }
+
+  const payloadHeaderLength =
+    (payload.length >= 2 << 16) ? 10 :
+    (payload.length >= 126) ? 4 :
+    2;
+
+  const header = new Buffer(payloadHeaderLength);
+  header[0] = 0b10000000 | (opCode & 0b00001111);
+
+  if (payload.length >= 2 << 16) {
+    header[1] = 127;
+    header[2] = payload.length >> 56;
+    header[3] = (payload.length >> 48) & 0xff;
+    header[4] = (payload.length >> 40) & 0xff;
+    header[5] = (payload.length >> 32) & 0xff;
+    header[6] = (payload.length >> 24) & 0xff;
+    header[7] = (payload.length >> 16) & 0xff;
+    header[8] = (payload.length >> 8) & 0xff;
+    header[9] = payload.length & 0xff;
+  }
+  else if (payload.length >= 126) {
+    header[1] = 126;
+    header[2] = payload.length >> 8;
+    header[3] = payload.length & 0xff;
+  }
+  else {
+    header[1] = payload.length;
+  }
+
+  conn.write(header);
+  conn.write(payload);
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -303,24 +373,26 @@ module.exports.createServer = function(callback) {
 
         for (let line of bufferedReader.lineIterator) {
           line = line.trim();
-          if (line === '') {
+
+          logTraffic('> ' + line);
+
+          let match;
+          if ((match = line.match(/^GET\s+(\S+)\s+HTTP\/1\../))) {
+            conn.url = match[1];
+          }
+          else if ((match = line.match(/^([^:]+):(.+)/i))) {
+            incomingHeaders.set(match[1].trim(), match[2].trim());
+          }
+          else if (line === '') {
             sendAck(conn, incomingHeaders);
             textMode = false;
 
-            wsBufferedReader.appendData(bufferedReader.dumpBuffers());
-
             callback(conn);
+
+            wsBufferedReader.appendData(bufferedReader.dumpBuffers());
 
             for (let message of wsBufferedReader) {
               conn.emit('message', message);
-            }
-          }
-          else {
-            logTraffic('> ' + line);
-
-            let match = line.match(/^([^:]+):(.+)/i);
-            if (match) {
-              incomingHeaders.set(match[1].trim(), match[2].trim());
             }
           }
         }
@@ -336,6 +408,14 @@ module.exports.createServer = function(callback) {
       //conn.end();
     });
 
+    conn.on('error', error => logTraffic(error));
+
+    conn.on('close', errorOcurred => {
+      logTraffic('Client ' + conn.remoteAddress + ' disconnected ' +
+        (errorOcurred ? 'with an error' : 'peacefully'));
+    });
+
+    conn.sendMessage = message => writeWSFrame(conn, message);
   });
 };
 
