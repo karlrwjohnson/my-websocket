@@ -6,8 +6,6 @@ const net = require('net');
 const Enum = require('./enum');
 const logging = require('./logging');
 
-const logTraffic = logging.logTraffic;
-
 logging.trace();
 
 class OpCode extends Enum {
@@ -86,13 +84,24 @@ class BufferLineScanner extends BufferScanner {
     for (let i = 0; i < this._buffers.length; i++) {
       for (let offset = 0; offset < this._buffers[i].length; offset++) {
         if (this._buffers[i][offset] === LF) {
+
+          // Concat all the buffers we've covered so far with the part of the
+          // current buffer we've matched so far
           let ret = this._buffers.slice(0, i)
             .map(buffer => buffer.toString('utf8'))
             .concat(this._buffers[i].toString('utf8', 0, offset + 1))
             .reduce((a,b) => a + b);
 
-          this._buffers[i] = this._buffers[i].slice(offset + 1);
-          this._buffers = this._buffers.slice(i);
+          // If we were at the end of the current buffer, remove it.
+          // Otherwise, remove the fully-covered buffers and the part of the
+          // current buffer we've covered
+          if (offset + 1 === this._buffers[i].length) 
+            this._buffers = this._buffers.slice(i + 1);
+          }
+          else {
+            this._buffers[i] = this._buffers[i].slice(offset + 1);
+            this._buffers = this._buffers.slice(i);
+          }
 
           return ret;
         }
@@ -177,6 +186,9 @@ class BufferFrameScanner extends BufferScanner {
       frame.rsv3          = !!(byte & 0b00010000);
       frame.opcode        = OpCode[byte & 0b00001111];
 
+      logging.debug('fin = ' + frame.fin);
+      logging.debug('opcode = ' + frame.opcode.name + '(' + (byte & 0b00001111) + ')');
+
       byte = itr.next();
       frame.masked        = !!(byte & 0b10000000);
       frame.payloadLen    =    byte & 0b01111111;
@@ -207,7 +219,7 @@ class BufferFrameScanner extends BufferScanner {
 
       itr.popToCursor();
 
-      logTraffic(frame);
+      logging.debug(JSON.stringify(frame));
       return frame;
     } catch (e) {
       if (e === itr.END_OF_DATA) {
@@ -322,11 +334,11 @@ class WebSocket {
   }
 
   onError (error) {
-    logTraffic(error);
+    logging.debug(error);
   }
 
   onClose (errorOccurred) {
-    logTraffic('Client ' + conn.remoteAddress + ' disconnected ' +
+    logging.debug('Client ' + conn.remoteAddress + ' disconnected ' +
         (errorOccurred ? 'with an error' : 'peacefully'));
   }
 
@@ -348,16 +360,20 @@ class WebSocket {
 
     line = line.trim();
 
-    logTraffic('> ' + line);
-
     let match;
     if ((match = line.match(/^GET\s+(\S+)\s+HTTP\/1\../))) {
+      logging.debug('> ' + line);
+
       this.conn.url = match[1];
     }
     else if ((match = line.match(/^([^:]+):(.+)/i))) {
+      logging.debug('> ' + line);
+
       this.incomingHeaders.set(match[1].trim(), match[2].trim());
     }
     else if (line === '') {
+      logging.debug('> ' + line);
+
       this.textMode = false;
 
       this.conn.write('HTTP/1.1 101 Switching Protocols\n');
@@ -402,7 +418,7 @@ class WebSocket {
       // ???
     }
     else {
-      console.error('Unhandled message type ' + frame.opcode.name);
+      logging.error('Unhandled message type ' + frame.opcode.name);
     }
   }
 

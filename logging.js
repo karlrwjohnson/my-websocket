@@ -1,12 +1,46 @@
-function getCallerInfo() {
-  const stackStrings = (new Error()).stack.split('\n');
-  const callerInfo = stackStrings[3];
-  const parsed = callerInfo.match(/^\s+at (?:.*\()?(.+):(\d+):(\d+)\)?$/);
-  return {
-    filename: parsed[1],
-    line: parsed[2],
-    column: parsed[3],
+'use strict';
+
+const path = require('path');
+
+const Enum = require('./enum');
+const Colors = require('./colors');
+
+class LogLevel extends Enum {
+  constructor(name, color) {
+    super(name);
+
+    this._color = color;
   }
+
+  get color () { return this._color; }
+}
+
+LogLevel.values([
+  ['TRACE', Colors.LIGHT_CYAN],
+  ['DEBUG', Colors.YELLOW],
+  ['INFO', Colors.LIGHT_BLUE],
+  ['ERROR', Colors.LIGHT_RED],
+]);
+
+function getCallerInfo(height) {
+  height = (height === undefined) ? 2 : height;
+  const stackStrings = (new Error()).stack.split('\n');
+  const callerInfo = stackStrings[1 + height];
+  const parsed = callerInfo.match(/^\s+at (.+) \((.+):(\d+):(\d+)\)$/);
+  return {
+    fn: parsed[1],
+    filename: parsed[2],
+    line: parsed[3],
+    column: parsed[4],
+  }
+}
+
+function log(level, message) {
+  const callerInfo = getCallerInfo(3);
+  const callerString = level.color.ansi + level.name + ':' +
+    path.basename(callerInfo.filename) + ':' +
+    callerInfo.line + ':' + callerInfo.fn + ':' + Colors.RESET.ansi;
+  console.log(callerString + (message ? ' ' + message : ''));
 }
 
 function logTraffic() {
@@ -17,13 +51,30 @@ function logTraffic() {
 }
 
 function trace(message) {
-  const callerInfo = getCallerInfo();
-  const callerString = callerInfo.filename + ':' + callerInfo.line;
-  console.log(callerString + (message ? ' ' + message : ''));
+  if (message === undefined) {
+    message = '--';
+  }
+  log(LogLevel.TRACE, message);
+}
+
+function debug(message) {
+  log(LogLevel.DEBUG, message);
+}
+
+
+function info(message) {
+  log(LogLevel.INFO, message);
+}
+
+function error(message) {
+  log(LogLevel.ERROR, message);
 }
 
 module.exports = {
   getCallerInfo: getCallerInfo,
   logTraffic: logTraffic,
-  trace: trace
+  trace: trace,
+  debug: debug,
+  info: info,
+  error: error,
 }

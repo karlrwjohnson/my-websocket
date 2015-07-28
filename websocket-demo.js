@@ -171,6 +171,8 @@ const js = `
     newMessageField = document.getElementById('newMessage');
     messageList = document.getElementById('messageList');
 
+    newMessageField.focus();
+
     var ws = new WebSocket('ws://127.0.0.1:' + ${WEBSOCKET_PORT});
     ws.onopen = function() {
       //ws.send("hello");
@@ -233,7 +235,7 @@ console.log(`Server running at http://${WEBSERVER_IP}:${WEBSERVER_PORT}`);
 const conns = new Set();
 
 websocket.createServer(conn => {
-  console.log('client connected to websocket from ' + conn.remoteAddress);
+  logging.info('client connected to websocket from ' + conn.remoteAddress);
 
   conns.forEach((recipient, id) =>
     recipient.sendMessage(JSON.stringify({
@@ -245,7 +247,7 @@ websocket.createServer(conn => {
   conns.add(conn);
 
   conn.on('message', message => {
-    console.log(message.toString('utf8'));
+    logging.info(message.toString('utf8'));
 
     conns.forEach((recipient, id) =>
       recipient.sendMessage(JSON.stringify({
@@ -268,7 +270,7 @@ websocket.createServer(conn => {
   });
 
 }).listen(WEBSOCKET_PORT, WEBSERVER_IP, () =>
-  console.log(`Websocket server running at ws://${WEBSERVER_IP}:${WEBSOCKET_PORT}`)
+  logging.info(`Websocket server running at ws://${WEBSERVER_IP}:${WEBSOCKET_PORT}`)
 );
 
 
