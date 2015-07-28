@@ -3,44 +3,22 @@
 const crypto = require('crypto');
 const net = require('net');
 
-function getCallerInfo() {
-  const stackStrings = (new Error()).stack.split('\n');
-  const callerInfo = stackStrings[3];
-  const parsed = callerInfo.match(/^\s+at (?:.*\()?(.+):(\d+):(\d+)\)?$/);
-  return {
-    filename: parsed[1],
-    line: parsed[2],
-    column: parsed[3],
+const Enum = require('./enum');
+const logging = require('./logging');
+
+const logTraffic = logging.logTraffic;
+
+logging.trace();
+
+class OpCode extends Enum {
+  constructor (name) {
+    super(name);
+  }
+  get isControl () {
+    return this.ordinal >= 8;
   }
 }
-
-function logTraffic() {
-  const callerInfo = getCallerInfo();
-  const callerString = callerInfo.filename + ':' + callerInfo.line;
-  const argsArray = [].slice.apply(arguments);
-  console.log.apply(console, [callerString].concat(argsArray));
-}
-
-
-function declareEnum(fn, members) {
-  for (let i = 0; i < members.length; i++) {
-    const member = members[i];
-    const instance = new fn();
-    Object.defineProperty(fn, member, { value: instance, enumerable: true });
-    Object.defineProperty(fn, i, { value: instance, enumerable: true });
-    Object.defineProperty(fn.prototype, member, { value: instance, enumerable: true });
-    Object.defineProperties(instance, {
-      'name': { value: member, enumerable: true },
-      'ordinal': { value: i, enumerable: true },
-    });
-  }
-  Object.defineProperty(fn.prototype, 'toString', { value: function() {
-    return this.name;
-  }});
-}
-
-class OpCode {};
-declareEnum(OpCode, [
+OpCode.values([
   'CONTINUATION',
   'TEXT',
   'BINARY',
@@ -61,17 +39,44 @@ declareEnum(OpCode, [
 
 module.exports.OpCode = OpCode;
 
-class BufferedReader {
-  constructor() {
+class BufferScanner {
+  constructor(bufferScanner) {
     this._buffers = [];
+
+    if (bufferScanner) {
+      for (let buffer of bufferScanner.dumpBuffers()) {
+        this.addBuffer(buffer);
+      }
+    }
   }
 
-  appendData (buffer) {
+  addBuffer (buffer) {
     this._buffers.push(buffer);
   }
 
   dumpBuffers () {
     return this._buffers.splice(0, Infinity);
+  }
+}
+Object.defineProperty(BufferScanner.prototype, Symbol.iterator, {
+  // Workaround for io.js not supporting dynamic property names
+  get: function() {
+    logging.trace();
+    return this._iterator;
+  }
+});
+
+class BufferLineScanner extends BufferScanner {
+  constructor(bufferScanner) {
+    super(bufferScanner);
+  }
+
+  *_iterator() {
+    let line;
+    while ((line = this.getNextLine()) !== null) {
+      logging.trace();
+      yield line;
+    }
   }
 
   getNextLine () {
@@ -96,20 +101,6 @@ class BufferedReader {
 
     // else
     return null;
-  }
-
-  get lineIterator() {
-    let that = this;
-    let ret = {};
-    ret[Symbol.iterator] = () => ({
-      next: () => {
-        let line = that.getNextLine();
-        return (line === null) ?
-          { done: true } :
-          { done: false, value: line };
-      }
-    });
-    return ret;
   }
 }
 
@@ -160,35 +151,15 @@ Object.defineProperty(BufferByteIterator.prototype, 'END_OF_DATA', {
   value: Symbol('END_OF_DATA')
 });
 
-class WSBufferedReader {
-  constructor() {
-    const that = this;
-
-    this._buffers = [];
-    this._frames = [];
-
-    this[Symbol.iterator] = () => ({
-      next: () => {
-        let message = that.getNextMessage();
-        if (message === null) {
-          return { done: true };
-        } else {
-          return { done: false, value: message };
-        }
-      }
-    });
+class BufferFrameScanner extends BufferScanner {
+  constructor(bufferScanner) {
+    super(bufferScanner);
   }
 
-  appendData (buffers) {
-    if (buffers instanceof Array) {
-      Array.prototype.push.apply(this._buffers, buffers);
-    } else {
-      this._buffers.push(buffers);
-    }
-
+  *_iterator() {
     let frame;
     while ((frame = this.getNextFrame()) !== null) {
-      this._frames.push(frame);
+      yield frame;
     }
   }
 
@@ -241,63 +212,33 @@ class WSBufferedReader {
     } catch (e) {
       if (e === itr.END_OF_DATA) {
         return null;
-      } else {
+      }
+      else {
         throw e;
       }
     }
   }
-
-  getNextMessage () {
-    for (let i = 0; i < this._frames.length; i++) {
-      if (this._frames[i].fin) {
-        let message = this._frames.slice(0, i + 1)
-          .map(
-            (this._frames[0].opcode === OpCode.TEXT) ?
-              frame => frame.payload.toString('utf8') :
-              frame => frame.payload
-          )
-          .reduce((f1, f2) => f1.concat(f2));
-
-        this._frames.splice(0, i + 1);
-        return message; 
-      }
-    }
-    // else
-    return null;
-  }
 }
 
-function websocketSecureResponse(key) {
+function getSecureResponse(key) {
   const RESPONSE_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
   const sha1 = crypto.createHash('sha1');
   sha1.update(key + RESPONSE_GUID, 'ascii');
   return sha1.digest('base64');
 }
 
-function sendAck(conn, incomingHeaders) {
-  conn.write('HTTP/1.1 101 Switching Protocols\n');
-  conn.write('Upgrade: websocket\n');
-  conn.write('Connection: Upgrade\n');
-
-  if (incomingHeaders.has('Sec-WebSocket-Key')) {
-    let response = websocketSecureResponse(incomingHeaders.get('Sec-WebSocket-Key'));
-    logTraffic('Response key is ' + response);
-    conn.write('Sec-WebSocket-Accept: ' + response + '\n');
-  }
-
-  conn.write('\n');
-}
-
-function writeWSFrame(conn, payload, opts) {
+function generateFrame(payload, opts) {
   let opCode;
 
   if (typeof payload === 'string') {
     payload = new Buffer(payload);
     opCode = opts && 'opCode' in opts ? opts.opcode : OpCode.TEXT;
-  } else if (payload instanceof Buffer) {
+  }
+  else if (payload instanceof Buffer) {
     // no need to convert
     opCode = opts && 'opCode' in opts ? opts.opcode : OpCode.BINARY;
-  } else {
+  }
+  else {
     throw Error('Not sure how to handle payload of type ' + payload);
   }
 
@@ -333,14 +274,63 @@ function writeWSFrame(conn, payload, opts) {
     header[1] = payload.length;
   }
 
-  conn.write(header);
-  conn.write(payload);
+  return {
+    header: header,
+    payload: payload
+  };
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
-module.exports.createServer = function(callback) {
-  return net.createServer(conn => {
+class WebSocket {
+  constructor (conn, onConnect) {
+    this.conn = conn;
+    this.onConnect = onConnect;
+
+    this.textMode = true;
+    this.incomingHeaders = new Map();
+    this.bufferLineScanner = new BufferLineScanner();
+    this.bufferFrameScanner = new BufferFrameScanner();
+    this.messageFrames = [];
+
+    this._onData = this.onData.bind(this);
+    this._onError = this.onError.bind(this);
+    this._onClose = this.onClose.bind(this);
+    this._sendMessage = this.sendMessage.bind(this);
+
+    this.conn.on('data', this._onData);
+    this.conn.on('error', this._onError);
+    this.conn.on('close', this._onClose);
+    this.conn.sendMessage = this._sendMessage;
+  }
+
+  onData (data) {
+    if (this.textMode) {
+      this.bufferLineScanner.addBuffer(data);
+
+      for (let line of this.bufferLineScanner) {
+        this.processLine(line);
+      }
+    }
+    else {
+      this.bufferFrameScanner.addBuffer(data);
+
+      for (let frame of this.bufferFrameScanner) {
+        this.processFrame(frame);
+      }
+    }
+  }
+
+  onError (error) {
+    logTraffic(error);
+  }
+
+  onClose (errorOccurred) {
+    logTraffic('Client ' + conn.remoteAddress + ' disconnected ' +
+        (errorOccurred ? 'with an error' : 'peacefully'));
+  }
+
+  processLine (line) {
     // GET / HTTP/1.1
     // Host: 127.0.0.1:8080
     // Connection: Upgrade
@@ -356,68 +346,79 @@ module.exports.createServer = function(callback) {
     // Sec-WebSocket-Key: S+w5xLaB43ihnN68ybtHLQ==
     // Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits
 
-    logTraffic('client connected from ' + conn.remoteAddress);
+    line = line.trim();
 
-    let secureResponse;
-    let textMode = true;
-    let continuation = '';
+    logTraffic('> ' + line);
 
-    const incomingHeaders = new Map();
+    let match;
+    if ((match = line.match(/^GET\s+(\S+)\s+HTTP\/1\../))) {
+      this.conn.url = match[1];
+    }
+    else if ((match = line.match(/^([^:]+):(.+)/i))) {
+      this.incomingHeaders.set(match[1].trim(), match[2].trim());
+    }
+    else if (line === '') {
+      this.textMode = false;
 
-    const bufferedReader = new BufferedReader();
-    const wsBufferedReader = new WSBufferedReader();
+      this.conn.write('HTTP/1.1 101 Switching Protocols\n');
+      this.conn.write('Upgrade: websocket\n');
+      this.conn.write('Connection: Upgrade\n');
 
-    conn.on('data', data => {
-      if (textMode) {
-        bufferedReader.appendData(data);
-
-        for (let line of bufferedReader.lineIterator) {
-          line = line.trim();
-
-          logTraffic('> ' + line);
-
-          let match;
-          if ((match = line.match(/^GET\s+(\S+)\s+HTTP\/1\../))) {
-            conn.url = match[1];
-          }
-          else if ((match = line.match(/^([^:]+):(.+)/i))) {
-            incomingHeaders.set(match[1].trim(), match[2].trim());
-          }
-          else if (line === '') {
-            sendAck(conn, incomingHeaders);
-            textMode = false;
-
-            callback(conn);
-
-            wsBufferedReader.appendData(bufferedReader.dumpBuffers());
-
-            for (let message of wsBufferedReader) {
-              conn.emit('message', message);
-            }
-          }
-        }
-      }
-      else {
-        wsBufferedReader.appendData(data);
-
-        for (let message of wsBufferedReader) {
-          conn.emit('message', message);
-        }
+      if (this.incomingHeaders.has('Sec-WebSocket-Key')) {
+        let response = getSecureResponse(this.incomingHeaders.get('Sec-WebSocket-Key'));
+        this.conn.write('Sec-WebSocket-Accept: ' + response + '\n');
       }
 
-      //conn.end();
-    });
+      this.conn.write('\n');
 
-    conn.on('error', error => logTraffic(error));
+      this.bufferFrameScanner.addBuffer(this.bufferLineScanner.dumpBuffers());
 
-    conn.on('close', errorOcurred => {
-      logTraffic('Client ' + conn.remoteAddress + ' disconnected ' +
-        (errorOcurred ? 'with an error' : 'peacefully'));
-    });
+      for (let frame of this.bufferFrameScanner) {
+        this.processFrame(frame);
+      }
+    }
+  }
 
-    conn.sendMessage = message => writeWSFrame(conn, message);
+  processFrame (frame) {
+    if (frame.opcode === OpCode.TEXT ||
+        frame.opcode === OpCode.BINARY ||
+        frame.opcode === OpCode.CONTINUATION) {
+      this.messageFrames.push(frame);
+
+      if (frame.fin) {
+        conn.emit('message',
+            this.messageFrames
+              .map((this.messageFrames.opcode === OpCode.TEXT) ?
+                frame => frame.payload.toString('utf8') :
+                frame => frame.payload
+              )
+              .reduce((f1, f2) => f1.concat(f2))
+        );
+
+        this.messageFrames.length = 0;
+      }
+    }
+    else if (frame.opcode === OpCode.CONNECTION_CLOSE) {
+      // ???
+    }
+    else {
+      console.error('Unhandled message type ' + frame.opcode.name);
+    }
+  }
+
+  sendMessage (message) {
+    let frame = generateFrame(message);
+    this.conn.write(frame.header);
+    this.conn.write(frame.payload);
+  }
+}
+
+module.exports.createServer = (onConnect) => {
+  return net.createServer(conn => {
+    new WebSocket(conn, onConnect);
   });
 };
+
 
 
 

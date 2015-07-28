@@ -4,6 +4,8 @@ const http = require('http');
 
 const websocket = require('./websocket');
 
+const logging = require('./logging');
+
 const WEBSERVER_IP = '127.0.0.1';
 const WEBSERVER_PORT = 8000;
 const WEBSOCKET_PORT = 8080;
@@ -171,14 +173,24 @@ const js = `
 
     var ws = new WebSocket('ws://127.0.0.1:' + ${WEBSOCKET_PORT});
     ws.onopen = function() {
-      ws.send("hello");
+      //ws.send("hello");
     };
     ws.onmessage = function(evt) {
       console.log(evt.data);
 
       var data = JSON.parse(evt.data);
       var li = document.createElement('li');
-      li.textContent = '[' + data.from + '] ' + data.message;
+      switch(data.type) {
+        case 'message':
+          li.textContent = '[' + data.from + ']: ' + data.message;
+          break;
+        case 'connection':
+          li.textContent = '[' + data.from + '] has connected';
+          break;
+        case 'disconnection':
+          li.textContent = '[' + data.from + '] has disconnected';
+          break;
+      }
       messageList.appendChild(li);
     };
   
@@ -222,6 +234,14 @@ const conns = new Set();
 
 websocket.createServer(conn => {
   console.log('client connected to websocket from ' + conn.remoteAddress);
+
+  conns.forEach((recipient, id) =>
+    recipient.sendMessage(JSON.stringify({
+      type: 'connection',
+      from: conn.remoteAddress + ' (#' + id + ')'
+    }))
+  );
+
   conns.add(conn);
 
   conn.on('message', message => {
@@ -229,14 +249,22 @@ websocket.createServer(conn => {
 
     conns.forEach((recipient, id) =>
       recipient.sendMessage(JSON.stringify({
+        type: 'message',
+        from: conn.remoteAddress + ' (#' + id + ')',
         message: message,
-        from: conn.remoteAddress + ' (#' + id + ')'
       }))
     );
   });
 
   conn.on('close', () => {
     conns.delete(conn);
+
+    conns.forEach((recipient, id) =>
+      recipient.sendMessage(JSON.stringify({
+        type: 'disconnection',
+        from: conn.remoteAddress + ' (#' + id + ')'
+      }))
+    );
   });
 
 }).listen(WEBSOCKET_PORT, WEBSERVER_IP, () =>
