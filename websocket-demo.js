@@ -240,19 +240,20 @@ websocket.createServer(conn => {
   conns.forEach((recipient, id) =>
     recipient.sendMessage(JSON.stringify({
       type: 'connection',
-      from: conn.remoteAddress + ' (#' + id + ')'
+      from: conn.remoteAddress + ':' + conn.remotePort
     }))
   );
 
   conns.add(conn);
 
   conn.on('message', message => {
-    logging.info(message.toString('utf8'));
+    logging.info(message);
+    logging.info(typeof message);
 
     conns.forEach((recipient, id) =>
       recipient.sendMessage(JSON.stringify({
         type: 'message',
-        from: conn.remoteAddress + ' (#' + id + ')',
+        from: conn.remoteAddress + ':' + conn.remotePort,
         message: message,
       }))
     );
@@ -264,7 +265,7 @@ websocket.createServer(conn => {
     conns.forEach((recipient, id) =>
       recipient.sendMessage(JSON.stringify({
         type: 'disconnection',
-        from: conn.remoteAddress + ' (#' + id + ')'
+        from: conn.remoteAddress + ':' + conn.remotePort
       }))
     );
   });

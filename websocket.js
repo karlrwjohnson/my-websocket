@@ -35,7 +35,7 @@ OpCode.values([
   'RESERVED_15'
 ]);
 
-module.exports.OpCode = OpCode;
+//module.exports.OpCode = OpCode;
 
 class BufferScanner {
   constructor(bufferScanner) {
@@ -78,7 +78,6 @@ class BufferLineScanner extends BufferScanner {
   }
 
   getNextLine () {
-    const CR = 0x0d;
     const LF = 0x0a;
 
     for (let i = 0; i < this._buffers.length; i++) {
@@ -95,7 +94,7 @@ class BufferLineScanner extends BufferScanner {
           // If we were at the end of the current buffer, remove it.
           // Otherwise, remove the fully-covered buffers and the part of the
           // current buffer we've covered
-          if (offset + 1 === this._buffers[i].length) 
+          if (offset + 1 === this._buffers[i].length) {
             this._buffers = this._buffers.slice(i + 1);
           }
           else {
@@ -186,9 +185,6 @@ class BufferFrameScanner extends BufferScanner {
       frame.rsv3          = !!(byte & 0b00010000);
       frame.opcode        = OpCode[byte & 0b00001111];
 
-      logging.debug('fin = ' + frame.fin);
-      logging.debug('opcode = ' + frame.opcode.name + '(' + (byte & 0b00001111) + ')');
-
       byte = itr.next();
       frame.masked        = !!(byte & 0b10000000);
       frame.payloadLen    =    byte & 0b01111111;
@@ -219,7 +215,6 @@ class BufferFrameScanner extends BufferScanner {
 
       itr.popToCursor();
 
-      logging.debug(JSON.stringify(frame));
       return frame;
     } catch (e) {
       if (e === itr.END_OF_DATA) {
@@ -334,12 +329,22 @@ class WebSocket {
   }
 
   onError (error) {
-    logging.debug(error);
+    logging.error(error);
   }
 
   onClose (errorOccurred) {
-    logging.debug('Client ' + conn.remoteAddress + ' disconnected ' +
+    logging.debug('Client ' + this.conn.remoteAddress + ' disconnected ' +
         (errorOccurred ? 'with an error' : 'peacefully'));
+
+    this.conn.removeListener('data', this._onData);
+    this.conn.removeListener('error', this._onError);
+    this.conn.removeListener('close', this._onClose);
+
+    delete this.conn;
+    delete this.incomingHeaders;
+    delete this.bufferLineScanner;
+    delete this.bufferFrameScanner;
+    delete this.messageFrames;
   }
 
   processLine (line) {
@@ -388,6 +393,8 @@ class WebSocket {
       this.conn.write('\n');
 
       this.bufferFrameScanner.addBuffer(this.bufferLineScanner.dumpBuffers());
+      
+      this.onConnect(this.conn);
 
       for (let frame of this.bufferFrameScanner) {
         this.processFrame(frame);
@@ -396,15 +403,16 @@ class WebSocket {
   }
 
   processFrame (frame) {
+    logging.debug(JSON.stringify(frame));
     if (frame.opcode === OpCode.TEXT ||
         frame.opcode === OpCode.BINARY ||
         frame.opcode === OpCode.CONTINUATION) {
       this.messageFrames.push(frame);
 
       if (frame.fin) {
-        conn.emit('message',
+        this.conn.emit('message',
             this.messageFrames
-              .map((this.messageFrames.opcode === OpCode.TEXT) ?
+              .map((this.messageFrames[0].opcode === OpCode.TEXT) ?
                 frame => frame.payload.toString('utf8') :
                 frame => frame.payload
               )

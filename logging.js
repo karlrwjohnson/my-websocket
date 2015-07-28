@@ -26,12 +26,21 @@ function getCallerInfo(height) {
   height = (height === undefined) ? 2 : height;
   const stackStrings = (new Error()).stack.split('\n');
   const callerInfo = stackStrings[1 + height];
-  const parsed = callerInfo.match(/^\s+at (.+) \((.+):(\d+):(\d+)\)$/);
-  return {
-    fn: parsed[1],
-    filename: parsed[2],
-    line: parsed[3],
-    column: parsed[4],
+  let parsed;
+  if ((parsed = callerInfo.match(/^\s+at (.+) \((.+):(\d+):(\d+)\)$/))) {
+    return {
+      fn: parsed[1],
+      filename: parsed[2],
+      line: parsed[3],
+      column: parsed[4],
+    }
+  } else if ((parsed = callerInfo.match(/^\s+at (.+):(\d+):(\d+)$/))) {
+    return {
+      fn: 'unknown',
+      filename: parsed[1],
+      line: parsed[2],
+      column: parsed[3],
+    }
   }
 }
 
