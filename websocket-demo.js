@@ -1,51 +1,16 @@
 'use strict';
 
+const fs = require('fs');
 const http = require('http');
-
-const websocket = require('./websocket');
+const path = require('path');
 
 const logging = require('./logging');
+const websocket = require('./websocket');
 
 const WEBSERVER_IP = '127.0.0.1';
 const WEBSERVER_PORT = 8000;
 const WEBSOCKET_PORT = 8080;
-
-/*function getCallerInfo() {
-  let stackStrings = (new Error()).stack.split('\n');
-  let callerInfo = stackStrings[3];
-  let parsed = callerInfo.match(/^\s+at (?:.*\()?(.+):(\d+):(\d+)\)?$/);
-  return {
-    filename: parsed[1],
-    line: parsed[2],
-    column: parsed[3],
-  }
-}
-
-function vlqEncode(number) {
-  const digits = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-
-}
-
-function genSourceMap(file) {
-  let callerInfo = getCallerInfo();
-  
-  let mapping = [
-    0, // Starting column in the generated code
-    0, // Index of original code in sources array
-    callerInfo.line, // Line number in original code
-    0 // Column in original code
-  ].map(numberToBase64).join(',');
-  
-  return {
-    'file': file + '\n//# sourceMappingUrl=/index.js.map',
-    'map': JSON.stringify({
-      version: 3,
-      sources: [callerInfo.filename],
-      mappings: [mapping]
-    })
-  };
-}*/
-
+const CLIENT_FILES_DIR = './client';
 
 class Element {
   constructor(tagName) {
@@ -157,76 +122,55 @@ const index = html (
       }),
       ul ({'id': 'messageList'})
     ),
+    script ({src: 'domlib.js'}),
     script ({src: 'index.js'})
   )
 );
-
-const js = `
-  'use strict';
-
-  var newMessageField = document.getElementById('newMessage');
-  var messageList = document.getElementById('messageList');
-  
-  document.addEventListener('DOMContentLoaded', function() {
-    newMessageField = document.getElementById('newMessage');
-    messageList = document.getElementById('messageList');
-
-    newMessageField.focus();
-
-    var ws = new WebSocket('ws://127.0.0.1:' + ${WEBSOCKET_PORT});
-    ws.onopen = function() {
-      //ws.send("hello");
-    };
-    ws.onmessage = function(evt) {
-      console.log(evt.data);
-
-      var data = JSON.parse(evt.data);
-      var li = document.createElement('li');
-      switch(data.type) {
-        case 'message':
-          li.textContent = '[' + data.from + ']: ' + data.message;
-          break;
-        case 'connection':
-          li.textContent = '[' + data.from + '] has connected';
-          break;
-        case 'disconnection':
-          li.textContent = '[' + data.from + '] has disconnected';
-          break;
-      }
-      messageList.appendChild(li);
-    };
-  
-    newMessageField.addEventListener('keydown', function(evt) {
-      if (evt.keyCode === 13) /* enter key */ {
-        ws.send(newMessageField.value);
-        newMessageField.value = '';
-      }
-    });
-  });
-`;
 
 function functionHeaderOnly(fn) {
   return ('' + fn).match(/^[^{]*/)[0];
 }
 
-function summarizeObject(obj) {
+function describeObject(obj) {
+  logging.debug(typeof obj);
+  logging.debug(obj.__proto__.constructor);  
+  logging.debug(JSON.encode(obj))
   for (let i in obj) {
-    console.log(' - ' + i + ' : ' + (obj[i] instanceof Function ? functionHeaderOnly(obj[i]) : obj[i]));
+    logging.debug(' - ' + i + ' : ' + (obj[i] instanceof Function ? functionHeaderOnly(obj[i]) : obj[i]));
   }
 }
+
+const ext2mimeType = {
+  'js': 'application/javascript',
+  'htm': 'text/html',
+  'html': 'text/html',
+  'txt': 'text/plain',
+  'json': 'application/json',
+  'svg': 'image/svg+xml'
+};
 
 http.createServer((req, res) => {
   if (req.url === '/') {
     res.writeHead('200', {'Content-Type': 'text/html'});
     res.end('<!DOCTYPE html>\n' + index.render());
   }
-  else if (req.url === '/index.js') {
-    res.writeHead('200', {'Content-Type': 'application/javascript'});
-    res.end(js);
-  }
   else {
-    res.writeHead('404', {'Content-Type': 'text/plain'});
-    res.end(`Page ${req.url} not found`);
+    fs.readdir(CLIENT_FILES_DIR, (err, files) => {
+      for (let filename of files) {
+        if ('/' + filename === req.url) {
+          let header = {};
+          let ext = path.extname(filename);
+          if (ext in ext2mimeType) {
+            header['Content-Type'] = ext2mimeType[ext];
+          }
+          res.writeHead('200', header);
+          fs.createReadStream(CLIENT_FILES_DIR + req.url).pipe(res);
+          return;
+        }
+      }
+      res.writeHead('404', {'Content-Type': 'text/plain'});
+      res.end(`Page ${req.url} not found`);
+    });
   }
 }).listen(WEBSERVER_PORT, WEBSERVER_IP);
 
